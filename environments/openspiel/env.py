@@ -391,7 +391,7 @@ class Actor:
 
         return accumulated_reward
 
-    def _create_training_opponent_bot(self, opponent: str, player_id: int, seed: int, game, agent):
+    def _create_training_opponent_bot(self, opponent: str, player_id: int, seed: int, game, agent, mcts_max_simulations: Optional[int] = None, mcts_num_rollouts: Optional[int] = None):
         """Create opponent bot for training mode"""
         game_type = game.get_type()
 
@@ -411,8 +411,12 @@ class Actor:
                 return uniform_random.UniformRandomBot(
                     player_id=player_id, rng=np.random.RandomState(seed + 2)
                 )
-
-            max_simulations, n_rollouts = mcts_config
+            
+            if mcts_max_simulations and mcts_num_rollouts:
+                max_simulations = mcts_max_simulations
+                n_rollouts = mcts_num_rollouts
+            else:
+                max_simulations, n_rollouts = mcts_config
             evaluator = SafeRandomRolloutEvaluator(
                 n_rollouts=n_rollouts, random_state=np.random.RandomState(seed + 3)
             )
@@ -436,6 +440,8 @@ class Actor:
         task_id: Optional[int] = None,
         seed: Optional[int] = None,
         opponent: str = "mcts",
+        mcts_max_simulations: Optional[int] = None,
+        mcts_num_rollouts: Optional[int] = None,
     ) -> OpenEnvResponse:
         """
         Reset environment and start a new game episode.
@@ -478,7 +484,7 @@ class Actor:
             # For 2-player game, opponent is 1 - llm_player_id
             opponent_player_id = 1 - llm_player_id if num_players == 2 else 0
             opponent_bot = self._create_training_opponent_bot(
-                opponent_type, opponent_player_id, resolved_seed, game, agent
+                opponent_type, opponent_player_id, resolved_seed, game, agent, mcts_max_simulations, mcts_num_rollouts
             )
 
         # Create initial game state
@@ -792,6 +798,8 @@ Your choice (action ID only):"""
         temperature: float = None,
         api_key: str = None,
         opponent: str = "mcts",
+        mcts_max_simulations: Optional[int] = None,
+        mcts_num_rollouts: Optional[int] = None,
     ):
         """
         Run single game evaluation
@@ -825,6 +833,8 @@ Your choice (action ID only):"""
                 opponent,
                 start_time,
                 timeout,
+                mcts_max_simulations,
+                mcts_num_rollouts
             ),
             timeout=timeout,
         )
@@ -840,6 +850,8 @@ Your choice (action ID only):"""
         opponent,
         start_time,
         task_timeout,
+        mcts_max_simulations: Optional[int] = None,
+        mcts_num_rollouts: Optional[int] = None,
     ):
         """Internal method to run evaluation with unified error handling"""
         llm_player_id = seed % 2
@@ -897,7 +909,7 @@ Your choice (action ID only):"""
                     bots.append(llm_bot)
                 else:
                     opponent_bot = self._create_opponent_bot(
-                        opponent, player_id, seed + 2 + player_id, game, agent
+                        opponent, player_id, seed + 2 + player_id, game, agent, mcts_max_simulations, mcts_num_rollouts
                     )
                     # Track TimedMCTSBot instances
                     if isinstance(opponent_bot, TimedMCTSBot):
@@ -1087,7 +1099,7 @@ Your choice (action ID only):"""
             score = 0.5
         return float(score)
 
-    def _create_opponent_bot(self, opponent, player_id, seed, game, agent):
+    def _create_opponent_bot(self, opponent, player_id, seed, game, agent, mcts_max_simulations: Optional[int] = None, mcts_num_rollouts: Optional[int] = None):
         """Create opponent bot based on type and game dynamics"""
         game_type = game.get_type()
         # For simultaneous move games, MCTS doesn't work - fallback to random
@@ -1111,7 +1123,11 @@ Your choice (action ID only):"""
                     player_id=player_id, rng=np.random.RandomState(seed + 2)
                 )
             
-            max_simulations, n_rollouts = mcts_config
+            if mcts_max_simulations and mcts_num_rollouts:
+                max_simulations = mcts_max_simulations
+                n_rollouts = mcts_num_rollouts
+            else: 
+                max_simulations, n_rollouts = mcts_config
             
             # Create a safe evaluator that handles edge cases
             evaluator = SafeRandomRolloutEvaluator(
