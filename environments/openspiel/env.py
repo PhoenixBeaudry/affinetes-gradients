@@ -1140,6 +1140,7 @@ Your choice (action ID only):"""
                 evaluator=evaluator,
                 random_state=np.random.RandomState(seed + 4),
             )
+            print(f"Created MCTS Opponent with values: {max_simulations}, {n_rollouts}")
             # Wrap with timing tracker
             return TimedMCTSBot(mcts_bot)
         else:
