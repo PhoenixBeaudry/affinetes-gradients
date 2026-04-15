@@ -50,7 +50,7 @@ KNOCKING:
 - Gin: ALL cards form melds (0 deadwood) = 25-point bonus
 
 SCORING: Winner scores difference in deadwood point values.
-Card Values: A=1, 2-10=face value, J=11, Q=12, K=13
+Card Values: A=1, 2-10=face value, J=10, Q=10, K=10
 
 IMPORTANT: Always respond with the action ID number ONLY, never card names."""
     
