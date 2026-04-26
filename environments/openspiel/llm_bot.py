@@ -45,6 +45,7 @@ class LLMBot(pyspiel.Bot):
         agent: BaseGameAgent,
         seed: Optional[int] = None,
         max_parsing_retries: int = DEFAULT_MAX_PARSING_RETRIES,
+        max_new_tokens: int = 20,
         executor: concurrent.futures.ThreadPoolExecutor = None,
     ):
         """
@@ -61,6 +62,7 @@ class LLMBot(pyspiel.Bot):
             agent: BaseGameAgent for game-specific logic (REQUIRED)
             seed: Random seed for LLM API reproducibility
             max_parsing_retries: Maximum parsing retry attempts
+            max_new_tokens: Maximum number of new tokens to generate per response
             executor: Shared ThreadPoolExecutor for concurrent LLM calls
         """
         pyspiel.Bot.__init__(self)
@@ -73,6 +75,7 @@ class LLMBot(pyspiel.Bot):
         self._seed = seed
         self._rng = np.random.RandomState(rng_seed)
         self._max_parsing_retries = max_parsing_retries
+        self._max_new_tokens = max_new_tokens
         self._agent = agent
         self._executor = executor
 
@@ -188,6 +191,7 @@ class LLMBot(pyspiel.Bot):
                 api_key=self._api_key,
                 temperature=self._temperature,
                 seed=self._seed,
+                max_new_tokens=self._max_new_tokens,
                 stream=True,
                 max_retries=10,
                 strip_think_tags=True,

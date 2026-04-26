@@ -133,6 +133,7 @@ async def llm_chat(
     chunk_timeout: float = 30.0,
     temperature: Optional[float] = None,
     seed: Optional[int] = None,
+    max_new_tokens: Optional[int] = None,
     stream: bool = True,
     max_chunks: int = 32_000,
     max_retries: int = 0,
@@ -190,6 +191,7 @@ async def llm_chat(
             messages=messages,
             temperature=temperature,
             seed=seed,
+            max_new_tokens=max_new_tokens,
             stream=stream,
             chunk_timeout=chunk_timeout,
             max_chunks=max_chunks,
@@ -212,6 +214,7 @@ async def _chat_with_retries(
     messages: List[Dict[str, Any]],
     temperature: Optional[float],
     seed: Optional[int],
+    max_new_tokens: Optional[int],
     stream: bool,
     chunk_timeout: float,
     max_chunks: int,
@@ -230,6 +233,8 @@ async def _chat_with_retries(
         params["temperature"] = temperature
     if seed is not None:
         params["seed"] = seed
+    if max_new_tokens is not None:
+        params["extra_body"] = {"max_new_tokens": max_new_tokens}
 
     last_exc: Optional[BaseException] = None
 
