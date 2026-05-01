@@ -434,8 +434,10 @@ class LLMEvaluator:
         """Execute unified scorer (all 5 dimensions in one parallel call)."""
         result = LLMEvaluationResult()
 
+        # No tool calls → not a system error, just nothing to evaluate.
+        # Hard constraints (tool_info_used, required_tools_called) already
+        # mark this as a 0-score outcome via the code path.
         if not context.get("tool_trace"):
-            result.error = "No tools called, cannot evaluate"
             return result
 
         unified_result = await self.unified.evaluate(context)
