@@ -10,7 +10,14 @@ from typing import Optional, Dict, List, Tuple, Any
 
 # Allow importing from parent directory (SWE-INFINITE/)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils import SANITIZE_GIT_SCRIPT, NORMALIZE_TIMESTAMPS_SCRIPT, NETWORK_BLOCKLIST_SCRIPT, DIFF_EXTENSIONS
+from utils import (
+    SANITIZE_GIT_SCRIPT,
+    NORMALIZE_TIMESTAMPS_SCRIPT,
+    NETWORK_BLOCKLIST_SCRIPT,
+    DIFF_EXTENSIONS,
+    ContainerLostError,
+    is_container_lost,
+)
 
 DOCKER_PULL_TIMEOUT = 300
 
@@ -56,7 +63,13 @@ class CodexAgent:
         env: Optional[Dict[str, str]] = None,
         stdin_data: Optional[str] = None,
     ) -> subprocess.CompletedProcess:
-        """Execute a command inside the Docker container."""
+        """Execute a command inside the Docker container.
+
+        Raises ContainerLostError when docker daemon reports the container is
+        gone (No such container, is not running, etc.) so the run aborts and
+        the caller can mark the eval as a retryable docker_error instead of a
+        zero-score sample.
+        """
         docker_cmd = ["docker", "exec"]
         if stdin_data is not None:
             docker_cmd.append("-i")
@@ -64,13 +77,21 @@ class CodexAgent:
             for k, v in env.items():
                 docker_cmd.extend(["-e", f"{k}={v}"])
         docker_cmd.extend([self._container_name, "bash", "-c", cmd])
-        return subprocess.run(
+        result = subprocess.run(
             docker_cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
             input=stdin_data,
         )
+        # Docker daemon writes container-loss errors to stderr only; checking
+        # stderr (not stdout) avoids false positives from JSONL conversation
+        # content that the model itself might produce.
+        if result.returncode != 0 and is_container_lost(result.stderr or ""):
+            raise ContainerLostError(
+                f"docker container lost: {(result.stderr or '').strip()[:300]}"
+            )
+        return result
 
     def _install_codex(self) -> bool:
         """Copy pre-built codex binary into the task container."""
