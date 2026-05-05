@@ -47,6 +47,44 @@ from canary import generate_canary, verify_canary
 DOCKER_PULL_TIMEOUT = 300
 VERIFY_TIMEOUT = 1800
 
+
+def _classify_agent_error(error_msg: str) -> str:
+    """Classify a miniswe / codex agent failure for retry routing.
+
+    Returned tag drives whether the eval is retried (raise RuntimeError
+    upstream) or recorded as a zero-score sample:
+
+      retryable: api_error, docker_error, agent_timeout
+      not retryable: context_exceeded, agent_error
+
+    Order matters — context_exceeded must precede api_error because every
+    LiteLLM traceback contains 'api'-ish substrings and would otherwise be
+    misclassified as a retryable network issue.
+    """
+    msg = (error_msg or "").lower()
+    if any(kw in msg for kw in (
+        "context length", "context window",
+        "maximum allowed length", "maximum context length",
+        "exceeds the maximum", "input length",
+        "contextwindowexceedederror",
+    )):
+        return "context_exceeded"
+    if "timeout" in msg or "timed out" in msg:
+        return "agent_timeout"
+    if msg.startswith("api_error") or any(kw in msg for kw in (
+        "authentication", "connection", "network",
+        "404", "401", "403", "no matching chute", "reconnecting",
+        "429", "rate limit", "ratelimit", "too many requests",
+        "500", "502", "503", "504",
+        "service unavailable", "internal server error", "bad gateway",
+    )):
+        return "api_error"
+    if any(kw in msg for kw in (
+        "docker", "container", "no space left", "pull image", "disk quota",
+    )):
+        return "docker_error"
+    return "agent_error"
+
 # OpenEnv constants
 DEFAULT_STEP_LIMIT = 100
 DEFAULT_COMMAND_TIMEOUT = 300
@@ -959,21 +997,9 @@ bash /workspace/entryscript.sh
         if not fix_patch or not fix_patch.strip():
             if agent_result.error:
                 print(f"[SWE-INFINITE] Agent error:\n{agent_result.error}")
-                error_msg = agent_result.error.lower()
-                if "timeout" in error_msg or "timed out" in error_msg:
-                    error_type = "agent_timeout"
-                elif error_msg.startswith("api_error") or any(kw in error_msg for kw in (
-                    "api", "authentication", "connection", "network",
-                    "404", "401", "403", "no matching chute", "reconnecting",
-                )):
-                    error_type = "api_error"
-                elif any(kw in error_msg for kw in (
-                    "docker", "container", "no space left", "pull image", "disk quota",
-                )):
-                    error_type = "docker_error"
-                else:
-                    error_type = "agent_error"
+                error_type = _classify_agent_error(agent_result.error)
                 if error_type in ("api_error", "docker_error", "agent_timeout"):
+                    error_msg = agent_result.error.lower()
                     if "no space left" in error_msg or "disk quota" in error_msg:
                         self._cleanup_docker_resources()
                     raise RuntimeError(f"{error_type}: {agent_result.error}")
