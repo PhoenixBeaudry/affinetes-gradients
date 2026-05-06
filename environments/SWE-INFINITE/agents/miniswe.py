@@ -51,15 +51,33 @@ class FailFastLitellmModel(LitellmModel):
     retry. This pairs with env.py's _classify_agent_error, which then
     records the failure as a non-retryable context_exceeded sample.
 
-    Also handles soft context-window trimming: when ``max_context_size``
-    is set, oldest assistant+observation message pairs are dropped before
-    each call so a long-running agent stays under the model's input limit
-    instead of failing the whole episode on overflow.
+    Also handles context-window overflow two ways:
+
+    1. Pre-emptive: when ``max_context_size`` is set, oldest assistant +
+       observation message pairs are dropped before each call so the
+       request stays under that soft cap.
+    2. Reactive: if the server still rejects the request as too long
+       (litellm ContextWindowExceededError, or a sglang/vllm 400 whose
+       message contains a context-length keyword), parse the model's
+       real limit out of the error, drop another pair, and retry inline.
+       This loop never bubbles up to the no-retry decorator below, so
+       the overflow doesn't kill the episode.
     """
+
+    _CONTEXT_OVERFLOW_KEYWORDS = (
+        "context length", "context window",
+        "maximum allowed length", "input length",
+        "exceeds the maximum", "is longer than",
+        "maximum context length",
+    )
 
     def __init__(self, *args, max_context_size: Optional[int] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.max_context_size = max_context_size
+        # Effective limit used by _trim_messages. Starts at the user-supplied
+        # cap and may be lowered at runtime if the server reports a smaller
+        # real limit in an overflow error.
+        self._learned_context_limit: Optional[int] = max_context_size
 
     def _count_tokens(self, messages) -> int:
         try:
@@ -68,35 +86,65 @@ class FailFastLitellmModel(LitellmModel):
             total_chars = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
             return total_chars // 4
 
-    def _trim_messages(self, messages):
-        """Drop oldest assistant+observation pairs if over ``max_context_size``.
+    def _is_context_overflow(self, err: BaseException) -> bool:
+        if isinstance(err, litellm.exceptions.ContextWindowExceededError):
+            return True
+        if isinstance(err, litellm.exceptions.BadRequestError):
+            text = str(err).lower()
+            return any(kw in text for kw in self._CONTEXT_OVERFLOW_KEYWORDS)
+        return False
 
-        Always preserves messages[0:2] (system + initial task prompt) and
-        drops in pairs of 2 to keep role alternation intact for providers
-        that require it (e.g. Anthropic).
+    def _learn_limit_from_error(self, err: BaseException) -> None:
+        """Extract the model's real input limit from an overflow error.
+
+        Errors look like: "The input (33201 tokens) is longer than the
+        model's context length (32768 tokens)." Both numbers are wrapped
+        in "(N tokens)"; the model limit is the smaller of the two. We
+        apply a 5% margin so subsequent calls stay safely under it.
         """
-        if not self.max_context_size or len(messages) <= 3:
+        nums = re.findall(r"\((\d+)\s*tokens?\)", str(err), re.IGNORECASE)
+        if not nums:
+            return
+        candidate = min(int(n) for n in nums)
+        safe_limit = int(candidate * 0.95)
+        if self._learned_context_limit is None or safe_limit < self._learned_context_limit:
+            self._learned_context_limit = safe_limit
+            print(f"[MINISWE] Learned context limit: {safe_limit} tokens "
+                  f"(parsed from server error)")
+
+    def _shrink_messages(self, messages):
+        """Drop the oldest assistant+observation pair (messages[2:4]).
+
+        Preserves head (system + initial task) and the most recent tail.
+        Returns None if there are no middle pairs left to drop.
+        """
+        if len(messages) < 4:
+            return None
+        return messages[:2] + messages[4:]
+
+    def _trim_messages(self, messages):
+        """Pre-emptive trim down to ``self._learned_context_limit``.
+
+        Drops in pairs of 2 (assistant + user observation) to preserve
+        role alternation for providers that require it.
+        """
+        limit = self._learned_context_limit
+        if not limit or len(messages) <= 3:
             return messages
-        if self._count_tokens(messages) <= self.max_context_size:
+        if self._count_tokens(messages) <= limit:
             return messages
 
         head = messages[:2]
         tail = list(messages[2:])
         dropped = 0
-        while len(tail) > 1:
+        while len(tail) >= 2:
             tail = tail[2:]
             dropped += 2
             trial = head + tail
-            if self._count_tokens(trial) <= self.max_context_size:
-                print(
-                    f"[MINISWE] Trimmed {dropped} oldest messages to fit "
-                    f"max_context_size={self.max_context_size} tokens"
-                )
+            if self._count_tokens(trial) <= limit:
+                print(f"[MINISWE] Pre-trimmed {dropped} oldest messages "
+                      f"to fit ~{limit} tokens")
                 return trial
-        print(
-            f"[MINISWE] Trimmed {dropped} messages (only head + last kept) "
-            f"to fit max_context_size={self.max_context_size} tokens"
-        )
         return head + tail
 
     @retry(
@@ -117,15 +165,33 @@ class FailFastLitellmModel(LitellmModel):
     )
     def _query(self, messages, **kwargs):
         messages = self._trim_messages(messages)
-        try:
-            return litellm.completion(
-                model=self.config.model_name,
-                messages=messages,
-                **(self.config.model_kwargs | kwargs),
-            )
-        except litellm.exceptions.AuthenticationError as e:
-            e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
-            raise e
+        # Inline shrink-and-retry for context overflow. Bounded so a
+        # pathological request can't loop forever; in practice we converge
+        # in 1-2 iterations once the real limit is learned.
+        for _ in range(64):
+            try:
+                return litellm.completion(
+                    model=self.config.model_name,
+                    messages=messages,
+                    **(self.config.model_kwargs | kwargs),
+                )
+            except litellm.exceptions.AuthenticationError as e:
+                e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
+                raise e
+            except Exception as e:
+                if not self._is_context_overflow(e):
+                    raise
+                self._learn_limit_from_error(e)
+                shrunk = self._shrink_messages(messages)
+                if shrunk is None:
+                    # Head alone overflows; nothing left to drop.
+                    raise
+                print(f"[MINISWE] Context overflow; dropped 2 oldest messages "
+                      f"({len(messages)} -> {len(shrunk)}) and retrying")
+                messages = shrunk
+        raise RuntimeError(
+            "Could not shrink messages enough to fit context window after 64 attempts"
+        )
 
 
 def _strip_thinking_tags(content: str) -> str:
