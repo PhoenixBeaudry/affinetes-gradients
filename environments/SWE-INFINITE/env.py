@@ -921,6 +921,7 @@ bash /workspace/entryscript.sh
         seed: Optional[int] = None,
         agent: str = "",
         max_iterations: int = 100,
+        max_context_size: Optional[int] = None,
         collect_logprobs: bool = False,
     ) -> Dict[str, Any]:
         """Evaluate an agent on a real PR task.
@@ -935,6 +936,9 @@ bash /workspace/entryscript.sh
             seed: Random seed for LLM inference
             agent: Agent type — "miniswe" or "codex". Empty = auto-select from task metadata.
             max_iterations: Max agent iterations (miniswe only)
+            max_context_size: Soft input-token cap; oldest message pairs are
+                dropped before each model call so the agent can keep working
+                instead of hitting a hard 4xx context-overflow (miniswe only).
         """
         start = time.time()
 
@@ -976,6 +980,7 @@ bash /workspace/entryscript.sh
                 model=model, api_base=base_url, api_key=eval_api_key,
                 temperature=temperature, timeout=timeout, seed=seed,
                 max_iterations=max_iterations,
+                max_context_size=max_context_size,
             )
             agent_obj = MiniSWEAgent(config)
 

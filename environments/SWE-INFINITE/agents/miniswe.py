@@ -50,7 +50,54 @@ class FailFastLitellmModel(LitellmModel):
     first try; only 5xx / network errors / KeyboardInterrupt still
     retry. This pairs with env.py's _classify_agent_error, which then
     records the failure as a non-retryable context_exceeded sample.
+
+    Also handles soft context-window trimming: when ``max_context_size``
+    is set, oldest assistant+observation message pairs are dropped before
+    each call so a long-running agent stays under the model's input limit
+    instead of failing the whole episode on overflow.
     """
+
+    def __init__(self, *args, max_context_size: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_context_size = max_context_size
+
+    def _count_tokens(self, messages) -> int:
+        try:
+            return litellm.token_counter(model=self.config.model_name, messages=messages)
+        except Exception:
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
+            return total_chars // 4
+
+    def _trim_messages(self, messages):
+        """Drop oldest assistant+observation pairs if over ``max_context_size``.
+
+        Always preserves messages[0:2] (system + initial task prompt) and
+        drops in pairs of 2 to keep role alternation intact for providers
+        that require it (e.g. Anthropic).
+        """
+        if not self.max_context_size or len(messages) <= 3:
+            return messages
+        if self._count_tokens(messages) <= self.max_context_size:
+            return messages
+
+        head = messages[:2]
+        tail = list(messages[2:])
+        dropped = 0
+        while len(tail) > 1:
+            tail = tail[2:]
+            dropped += 2
+            trial = head + tail
+            if self._count_tokens(trial) <= self.max_context_size:
+                print(
+                    f"[MINISWE] Trimmed {dropped} oldest messages to fit "
+                    f"max_context_size={self.max_context_size} tokens"
+                )
+                return trial
+        print(
+            f"[MINISWE] Trimmed {dropped} messages (only head + last kept) "
+            f"to fit max_context_size={self.max_context_size} tokens"
+        )
+        return head + tail
 
     @retry(
         reraise=True,
@@ -69,6 +116,7 @@ class FailFastLitellmModel(LitellmModel):
         )),
     )
     def _query(self, messages, **kwargs):
+        messages = self._trim_messages(messages)
         try:
             return litellm.completion(
                 model=self.config.model_name,
@@ -129,6 +177,7 @@ class MiniSWEConfig:
     timeout: int = 300
     seed: Optional[int] = None
     cwd: str = "/app"
+    max_context_size: Optional[int] = None
 
 
 @dataclass
@@ -265,6 +314,7 @@ class MiniSWEAgent:
                 model_name=model_name,
                 model_kwargs=model_kwargs,
                 cost_tracking="ignore_errors",
+                max_context_size=self.config.max_context_size,
             )
 
             # 3. Initialize Docker environment
